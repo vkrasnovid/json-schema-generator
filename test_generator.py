@@ -521,5 +521,50 @@ class TestPatternFallbackBugs(unittest.TestCase):
         self.assertEqual(result, "hello")
 
 
+class TestPatternCharGroupCoverage(unittest.TestCase):
+    """Ensure _fill_pattern_fallback covers ALL character groups from a pattern class."""
+
+    def test_all_char_groups_represented(self):
+        """Pattern with many groups and maxLength=50 must include representative from each group."""
+        from json_schema_generator import _fill_pattern_fallback
+
+        pattern = r"^[a-zA-Za-yA-Y0-9\s_.,'\\/ёЁ«»№-]{0,50}$"
+        result = _fill_pattern_fallback(pattern, 50)
+        self.assertLessEqual(len(result), 50)
+
+        # Must contain at least one digit
+        self.assertTrue(any(c.isdigit() for c in result), f"Missing digit in: {result!r}")
+        # Must contain latin lowercase
+        self.assertTrue(any('a' <= c <= 'z' for c in result), f"Missing latin lower in: {result!r}")
+        # Must contain latin uppercase
+        self.assertTrue(any('A' <= c <= 'Z' for c in result), f"Missing latin upper in: {result!r}")
+        # Must contain space (whitespace)
+        self.assertIn(' ', result, f"Missing space in: {result!r}")
+        # Must contain underscore
+        self.assertIn('_', result, f"Missing underscore in: {result!r}")
+        # Must contain period
+        self.assertIn('.', result, f"Missing period in: {result!r}")
+        # Must contain comma
+        self.assertIn(',', result, f"Missing comma in: {result!r}")
+        # Must contain single quote
+        self.assertIn("'", result, f"Missing single quote in: {result!r}")
+        # Must contain backslash
+        self.assertIn('\\', result, f"Missing backslash in: {result!r}")
+        # Must contain slash
+        self.assertIn('/', result, f"Missing slash in: {result!r}")
+        # Must contain cyrillic ё
+        self.assertIn('ё', result, f"Missing ё in: {result!r}")
+        # Must contain cyrillic Ё
+        self.assertIn('Ё', result, f"Missing Ё in: {result!r}")
+        # Must contain left guillemet «
+        self.assertIn('«', result, f"Missing « in: {result!r}")
+        # Must contain right guillemet »
+        self.assertIn('»', result, f"Missing » in: {result!r}")
+        # Must contain № (numero sign)
+        self.assertIn('№', result, f"Missing № in: {result!r}")
+        # Must contain hyphen
+        self.assertIn('-', result, f"Missing hyphen in: {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

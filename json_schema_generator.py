@@ -345,21 +345,51 @@ def _fill_pattern_fallback(pattern: str, target_len: int) -> str:
                 for idx in range(count):
                     segment.append(char_list[idx % L])
             else:
-                # Fewer slots than chars: reserve space for tail, then stride
-                # through middle chars to cover all groups (digits, latin, cyrillic, etc)
-                tail_count = min(3, count // 4)  # reserve ~25% of slots for tail
-                main_count = count - tail_count
-                
-                stride = max(1, (L - tail_count) // main_count) if main_count > 0 else 1
-                for idx in range(main_count):
-                    pos = min(idx * stride, L - tail_count - 1)
-                    segment.append(char_list[pos])
-                
-                # Add tail (last unique important chars)
-                for i in range(tail_count):
-                    pos = L - tail_count + i
-                    if pos < L:
-                        segment.append(char_list[pos])
+                # Fewer slots than chars: ensure ALL distinct character groups
+                # are represented, then fill remaining slots by cycling.
+                def _char_group(ch: str) -> str:
+                    cp = ord(ch)
+                    if ch.isdigit():
+                        return 'digit'
+                    if 'a' <= ch <= 'z':
+                        return 'latin_lower'
+                    if 'A' <= ch <= 'Z':
+                        return 'latin_upper'
+                    if cp == 0x0451:  # ё (separate from а-я range)
+                        return 'cyrillic_yo_lower'
+                    if cp == 0x0401:  # Ё (separate from А-Я range)
+                        return 'cyrillic_yo_upper'
+                    if 0x0430 <= cp <= 0x044F:  # а-я
+                        return 'cyrillic_lower'
+                    if 0x0410 <= cp <= 0x042F:  # А-Я
+                        return 'cyrillic_upper'
+                    return 'special_' + ch  # each special char is its own group
+
+                # Collect one representative per group, preserving order
+                seen_groups: dict[str, str] = {}
+                for ch in char_list:
+                    g = _char_group(ch)
+                    if g not in seen_groups:
+                        seen_groups[g] = ch
+
+                representatives = list(seen_groups.values())
+                if len(representatives) >= count:
+                    # More groups than slots: just take first `count` representatives
+                    segment = representatives[:count]
+                else:
+                    # Start with one from each group, fill rest by cycling full list
+                    segment = list(representatives)
+                    idx = 0
+                    while len(segment) < count:
+                        ch = char_list[idx % L]
+                        if ch not in segment or len(segment) >= len(set(char_list)):
+                            segment.append(ch)
+                        idx += 1
+                        if idx > L * 2:
+                            # safety: just append cycling
+                            while len(segment) < count:
+                                segment.append(char_list[len(segment) % L])
+                            break
             parts.append(''.join(segment))
 
     return ''.join(parts)
