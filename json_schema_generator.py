@@ -118,23 +118,10 @@ def generate_string(schema: dict, root_schema: dict) -> str:
     # Pattern-based generation
     if pattern:
         target_len = max_len or DEFAULT_STRING_LENGTH
-        if HAS_RSTR:
-            # Try to generate a long string matching the pattern
-            try:
-                candidates = [rstr.xeger(pattern) for _ in range(10)]
-                val = max(candidates, key=len)
-                # If shorter than target, try repeating if pattern allows .* or .+
-                if len(val) < target_len:
-                    for _ in range(50):
-                        candidate = rstr.xeger(pattern)
-                        if len(candidate) > len(val):
-                            val = candidate
-                        if len(val) >= target_len:
-                            break
-                return val[:target_len]
-            except Exception:
-                pass
-        # Fallback: try to figure out a fill character from the pattern
+        # Always use the smart fallback parser — it respects structure,
+        # quantifiers, literal separators, and ensures full character diversity.
+        # rstr.xeger() generates random-length strings with random char selection,
+        # which misses the "maximally filled" goal.
         val = _fill_pattern_fallback(pattern, target_len)
         return val[:target_len]
 
@@ -347,10 +334,32 @@ def _fill_pattern_fallback(pattern: str, target_len: int) -> str:
             char_list = token[1]
             if not char_list:
                 char_list = ['x']
-            # Cycle through chars for diversity
+            # Build segment ensuring we cycle through ALL chars for max diversity.
+            # If count < len(char_list), we need to use a stride to cover all groups.
+            L = len(char_list)
             segment = []
-            for idx in range(count):
-                segment.append(char_list[idx % len(char_list)])
+            if L <= 1:
+                segment = char_list * count
+            elif count >= L:
+                # More slots than chars: cycle through all
+                for idx in range(count):
+                    segment.append(char_list[idx % L])
+            else:
+                # Fewer slots than chars: reserve space for tail, then stride
+                # through middle chars to cover all groups (digits, latin, cyrillic, etc)
+                tail_count = min(3, count // 4)  # reserve ~25% of slots for tail
+                main_count = count - tail_count
+                
+                stride = max(1, (L - tail_count) // main_count) if main_count > 0 else 1
+                for idx in range(main_count):
+                    pos = min(idx * stride, L - tail_count - 1)
+                    segment.append(char_list[pos])
+                
+                # Add tail (last unique important chars)
+                for i in range(tail_count):
+                    pos = L - tail_count + i
+                    if pos < L:
+                        segment.append(char_list[pos])
             parts.append(''.join(segment))
 
     return ''.join(parts)
