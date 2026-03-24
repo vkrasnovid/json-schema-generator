@@ -466,5 +466,60 @@ class TestComplexRealWorld(unittest.TestCase):
         self.assertEqual(result["metadata"]["source"], "mobile")  # longest enum
 
 
+class TestPatternFallbackBugs(unittest.TestCase):
+    """Regression tests for _fill_pattern_fallback bugs."""
+
+    def test_uuid_pattern_has_dashes(self):
+        """Bug 1: UUID pattern must include literal dash separators."""
+        schema = {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        }
+        result = generate_from_schema(schema)
+        # Must contain dashes in the right positions
+        self.assertEqual(result[8], '-')
+        self.assertEqual(result[13], '-')
+        self.assertEqual(result[18], '-')
+        self.assertEqual(result[23], '-')
+        # Total length: 8+1+4+1+4+1+4+1+12 = 36
+        self.assertEqual(len(result), 36)
+        # All non-dash chars should be valid hex
+        hex_chars = result.replace('-', '')
+        self.assertTrue(all(c in '0123456789abcdefABCDEF' for c in hex_chars))
+
+    def test_char_class_diversity(self):
+        """Bug 2: Character classes should use diverse characters, not just the first."""
+        schema = {
+            "type": "string",
+            "pattern": "^[0-9a-zA-Z_-]{1,50}$",
+        }
+        result = generate_from_schema(schema)
+        # Should have more than one unique character
+        unique_chars = set(result)
+        self.assertGreater(len(unique_chars), 1,
+                           f"Expected diverse characters but got: {result!r}")
+
+    def test_cyrillic_char_class_diversity(self):
+        """Bug 2 variant: Cyrillic + Latin character classes should be diverse."""
+        from json_schema_generator import _fill_pattern_fallback
+        result = _fill_pattern_fallback("^[0-9a-zA-Zа-яА-Я\\s_-]{1,50}$", 50)
+        unique_chars = set(result)
+        self.assertGreater(len(unique_chars), 1,
+                           f"Expected diverse characters but got: {result!r}")
+        self.assertEqual(len(result), 50)
+
+    def test_quantifier_exact(self):
+        """Exact quantifiers like {8} produce exactly 8 characters."""
+        from json_schema_generator import _fill_pattern_fallback
+        result = _fill_pattern_fallback("^[a-z]{5}$", 100)
+        self.assertEqual(len(result), 5)
+
+    def test_literal_chars_preserved(self):
+        """Literal characters in patterns are preserved."""
+        from json_schema_generator import _fill_pattern_fallback
+        result = _fill_pattern_fallback("^hello$", 100)
+        self.assertEqual(result, "hello")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

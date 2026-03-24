@@ -148,56 +148,212 @@ def generate_string(schema: dict, root_schema: dict) -> str:
         return "x" * DEFAULT_STRING_LENGTH
 
 
+def _expand_char_class(class_body: str) -> list:
+    """
+    Expand a character class body (the content between [ and ]) into a list
+    of individual characters.  Handles ranges (a-z, 0-9, а-я, etc.),
+    escape sequences (\\d, \\w, \\s), and literal characters.
+    """
+    chars: list[str] = []
+    i = 0
+    n = len(class_body)
+    # Skip leading ^ (negated class — we can't invert, just use printable)
+    if i < n and class_body[i] == '^':
+        import string
+        return list(string.printable.strip())
+
+    while i < n:
+        # Escape sequences
+        if class_body[i] == '\\' and i + 1 < n:
+            nc = class_body[i + 1]
+            if nc == 'd':
+                chars.extend('0123456789')
+            elif nc == 'w':
+                chars.extend(
+                    list('abcdefghijklmnopqrstuvwxyz')
+                    + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                    + list('0123456789')
+                    + ['_']
+                )
+            elif nc == 's':
+                chars.append(' ')
+            elif nc == 'n':
+                chars.append('\n')
+            elif nc == 't':
+                chars.append('\t')
+            else:
+                # Escaped literal (e.g. \\-, \\., \\\\)
+                chars.append(nc)
+            i += 2
+            continue
+
+        # Check for range: c - d
+        if i + 2 < n and class_body[i + 1] == '-' and class_body[i + 2] != ']':
+            start_char = class_body[i]
+            end_char = class_body[i + 2]
+            lo, hi = ord(start_char), ord(end_char)
+            if lo <= hi:
+                chars.extend(chr(c) for c in range(lo, hi + 1))
+            i += 3
+            continue
+
+        # Literal character (including '-' at start/end of class)
+        chars.append(class_body[i])
+        i += 1
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in chars:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+def _parse_pattern_tokens(pattern: str) -> list:
+    """
+    Parse a regex pattern into a list of tokens.
+    Each token is a tuple: ('literal', char), ('class', [chars]), or ('dot',).
+    Anchors (^ $) are skipped.  Quantifiers are attached to the preceding token
+    as a repeat count (min, max).
+    Returns list of (token, repeat_min, repeat_max).
+    """
+    tokens: list[tuple] = []
+    i = 0
+    n = len(pattern)
+
+    while i < n:
+        c = pattern[i]
+
+        # Skip anchors
+        if c in ('^', '$'):
+            i += 1
+            continue
+
+        # Character class [...]
+        if c == '[':
+            j = i + 1
+            # Handle ] as first char in class
+            if j < n and pattern[j] == ']':
+                j += 1
+            while j < n and pattern[j] != ']':
+                if pattern[j] == '\\' and j + 1 < n:
+                    j += 2
+                else:
+                    j += 1
+            class_body = pattern[i + 1:j]
+            chars = _expand_char_class(class_body)
+            token = ('class', chars)
+            i = j + 1  # skip past ]
+
+        # Escape sequences outside class
+        elif c == '\\' and i + 1 < n:
+            nc = pattern[i + 1]
+            if nc == 'd':
+                token = ('class', list('0123456789'))
+            elif nc == 'w':
+                token = ('class', list('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'))
+            elif nc == 's':
+                token = ('class', [' '])
+            else:
+                token = ('literal', nc)
+            i += 2
+
+        # Dot — any printable
+        elif c == '.':
+            import string
+            token = ('class', list(string.printable.strip()))
+            i += 1
+
+        # Grouping — skip parens (flatten)
+        elif c in ('(', ')'):
+            i += 1
+            continue
+
+        # Alternation — stop (just use left branch)
+        elif c == '|':
+            break
+
+        # Quantifiers — attach to previous token
+        elif c in ('{', '*', '+', '?'):
+            if c == '{':
+                j = i + 1
+                while j < n and pattern[j] != '}':
+                    j += 1
+                quant_body = pattern[i + 1:j]
+                i = j + 1
+                if ',' in quant_body:
+                    parts = quant_body.split(',', 1)
+                    rmin = int(parts[0]) if parts[0].strip() else 0
+                    rmax = int(parts[1]) if parts[1].strip() else max(rmin, 50)
+                else:
+                    rmin = rmax = int(quant_body)
+                if tokens:
+                    prev_tok, _, _ = tokens[-1]
+                    tokens[-1] = (prev_tok, rmin, rmax)
+                continue
+            elif c == '*':
+                if tokens:
+                    prev_tok, _, _ = tokens[-1]
+                    tokens[-1] = (prev_tok, 0, 50)
+                i += 1
+                continue
+            elif c == '+':
+                if tokens:
+                    prev_tok, _, _ = tokens[-1]
+                    tokens[-1] = (prev_tok, 1, 50)
+                i += 1
+                continue
+            elif c == '?':
+                if tokens:
+                    prev_tok, _, _ = tokens[-1]
+                    tokens[-1] = (prev_tok, 0, 1)
+                i += 1
+                continue
+        else:
+            # Literal character
+            token = ('literal', c)
+            i += 1
+
+        # Default repeat: exactly 1
+        tokens.append((token, 1, 1))
+
+    return tokens
+
+
 def _fill_pattern_fallback(pattern: str, target_len: int) -> str:
     """
-    Basic pattern filling fallback (no rstr).
-    Tries to generate a string that satisfies common patterns.
+    Smart pattern filling fallback (no rstr).
+    Parses the regex structure and generates a string that respects:
+    - Literal characters between groups
+    - Character classes with full expansion and diversity
+    - Quantifiers {n}, {n,m}, +, *, ?
     """
-    # Detect allowed characters from character classes
-    char_class_match = re.search(r'\[([^\]]+)\]', pattern)
-    if char_class_match:
-        char_class = char_class_match.group(1)
-        # Get first char that's not a range indicator
-        fill_char = None
-        i = 0
-        while i < len(char_class):
-            c = char_class[i]
-            if c == '\\' and i + 1 < len(char_class):
-                nc = char_class[i+1]
-                if nc == 'd':
-                    fill_char = '9'
-                    break
-                elif nc == 'w':
-                    fill_char = 'x'
-                    break
-                elif nc == 's':
-                    fill_char = ' '
-                    break
-                i += 2
-            elif c not in '-^':
-                fill_char = c
-                break
-            else:
-                i += 1
-        if fill_char:
-            return fill_char * target_len
+    tokens = _parse_pattern_tokens(pattern)
 
-    # Check for \d
-    if '\\d' in pattern:
-        return '9' * target_len
-    # Check for \w
-    if '\\w' in pattern:
+    if not tokens:
         return 'x' * target_len
-    # Check for [a-z] style
-    if re.search(r'[a-z]', pattern):
-        return 'z' * target_len
 
-    # Anchors only: just fill with x
-    stripped = re.sub(r'[\^\$\.\*\+\?\(\)\{\}\[\]\|\\]', '', pattern)
-    if stripped:
-        return (stripped * (target_len // len(stripped) + 1))[:target_len]
+    parts: list[str] = []
+    for token, rmin, rmax in tokens:
+        kind = token[0]
+        count = rmax  # use max to fill maximally
 
-    return 'x' * target_len
+        if kind == 'literal':
+            ch = token[1]
+            parts.append(ch * count)
+        elif kind == 'class':
+            char_list = token[1]
+            if not char_list:
+                char_list = ['x']
+            # Cycle through chars for diversity
+            segment = []
+            for idx in range(count):
+                segment.append(char_list[idx % len(char_list)])
+            parts.append(''.join(segment))
+
+    return ''.join(parts)
 
 
 def generate_number(schema: dict, is_integer: bool) -> Any:
